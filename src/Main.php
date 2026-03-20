@@ -38,28 +38,29 @@ class Main extends PluginBase
                         return;
                     }
 
-                    $buf = @socket_read($client, 4096);
+                    $buf = @socket_read($client, 8192);
                     if (!$buf) {
                         @socket_close($client);
                         return;
                     }
 
-                    if ($this->password !== "") {
-                        $authorized = false;
-                        if (preg_match('/^Authorization:\s*Basic\s+([^\r\n]+)/im', $buf, $m)) {
-                            $decoded = base64_decode(trim($m[1]));
-                            if (strpos($decoded, ':') !== false) {
-                                $pass = explode(':', $decoded, 2)[1];
-                                if ($pass === $this->password) {
-                                    $authorized = true;
-                                }
+                    $authenticated = strpos($buf, "webpanel_auth=1") !== false;
+
+                    if (!$authenticated) {
+                        if (preg_match('/^POST /', $buf) && preg_match('/pass=([^&\r\n]+)/', $buf, $m)) {
+                            $submitted = urldecode(trim($m[1]));
+                            if ($submitted === $this->password) {
+                                $this->sendResponse($client, "HTTP/1.1 302 Found\r\nSet-Cookie: webpanel_auth=1; Path=/; Max-Age=86400\r\nLocation: /players\r\n\r\n");
+                                @socket_close($client);
+                                return;
                             }
                         }
-                        if (!$authorized) {
-                            $this->sendResponse($client, "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"WebPanel\"\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>WebPanel</title><style>body{background:#0f172a;color:white;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><div style=\"text-align:center\"><h1>Passwort erforderlich</h1><p>Username: beliebig<br>Password: " . htmlspecialchars($this->password) . "</p></div></body></html>");
-                            @socket_close($client);
-                            return;
-                        }
+
+                        $loginHtml = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>WebPanel Login</title><script src="https://cdn.tailwindcss.com"></script><style>@import url(\'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap\');body { font-family: \'Inter\', sans-serif; background: #0f172a; color: white; margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center; }.card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); }</style></head><body><div class="card w-full max-w-md mx-4 p-10 rounded-3xl shadow-2xl"><div class="text-center mb-10"><span class="text-4xl font-black gradient-text tracking-tighter">WebPanel</span></div><form method="post" class="space-y-6"><div><input type="password" name="pass" placeholder="Enter password" class="w-full bg-[#1f2937] border border-[#4b5563] text-white placeholder:text-[#9ca3af] rounded-2xl px-6 py-4 focus:outline-none focus:border-[#60a5fa] focus:bg-[#334155] text-lg" required autocomplete="off"></div><button type="submit" class="w-full bg-[#60a5fa] hover:bg-[#3b82f6] text-white font-bold py-4 rounded-2xl text-lg transition">Login</button></form><p class="text-center text-white/40 text-sm mt-8">Password from config.yml</p></div></body></html>';
+
+                        $this->sendResponse($client, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" . $loginHtml);
+                        @socket_close($client);
+                        return;
                     }
 
                     if (preg_match('#^GET /api/players #', $buf)) {
