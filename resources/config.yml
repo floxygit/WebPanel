@@ -1,2 +1,5 @@
+# WebPanel Config - Easy and Fast
+# App Password is needed to make the webpanel and server safe.
 appPassword: 1234
+# Choose the App Port.
 appPort: 7800
