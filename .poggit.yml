@@ -5,4 +5,5 @@ branches:
 projects:
   WebPanel:
     path: ""
+    icon: webpanel.png
 ...
