@@ -1,0 +1,5 @@
+name: WebPanel
+version: 1.0.0
+api: 5.0.0
+src-namespace-prefix: floxygit\WebPanel
+main: floxygit\WebPanel\Main
