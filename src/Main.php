@@ -32,6 +32,7 @@ class Main extends PluginBase
         if (@socket_bind($this->socket, "0.0.0.0", $port) && @socket_listen($this->socket)) {
             $this->getLogger()->info("Web Server was started on Port {$port}.");
             socket_set_nonblock($this->socket);
+
             $this->getScheduler()->scheduleRepeatingTask(new class($this->socket, $this->appPassword, $this) extends Task {
                 public function __construct(private $s, private $password, private Main $plugin) {}
 
@@ -53,7 +54,10 @@ class Main extends PluginBase
                         if (preg_match('/^POST /', $buf) && preg_match('/pass=([^&\r\n]+)/', $buf, $m)) {
                             $submitted = urldecode(trim($m[1]));
                             if ($submitted === $this->password) {
-                                $this->sendResponse($client, "HTTP/1.1 302 Found\r\nSet-Cookie: webpanel_auth=1; Path=/; Max-Age=86400\r\nLocation: /players\r\n\r\n");
+                                // ────────────────────────────────────────────────
+                                // HIER GEÄNDERT: Nach Login → Dashboard (/) statt /players
+                                $this->sendResponse($client, "HTTP/1.1 302 Found\r\nSet-Cookie: webpanel_auth=1; Path=/; Max-Age=86400\r\nLocation: /\r\n\r\n");
+                                // ────────────────────────────────────────────────
                                 @socket_close($client);
                                 return;
                             }
@@ -169,7 +173,6 @@ class Main extends PluginBase
                         return;
                     }
 
-                    // NEUE ROUTE FÜR PLUGIN-DOWNLOAD
                     if (preg_match('#^GET /api/plugin/download\?([^ ]+)#', $buf, $m)) {
                         parse_str($m[1], $params);
                         $name = $params['name'] ?? null;
@@ -268,7 +271,7 @@ class Main extends PluginBase
         $liveScript = '';
 
         if ($page === "players") {
-            $liveScript = '
+            $liveScript = '    
             <script>
                 const playersContainer = document.getElementById("players-container");
                 const countBadge = document.getElementById("online-count");
@@ -342,7 +345,7 @@ class Main extends PluginBase
         }
 
         if ($page === "console") {
-            $liveScript = '
+            $liveScript = '    
             <script>
                 const consoleOutput = document.getElementById("console-output");
                 const cmdInput = document.getElementById("cmd-input");
@@ -416,11 +419,11 @@ class Main extends PluginBase
         }
 
         if ($page === "plugin-downloader") {
-            $liveScript = '
+            $liveScript = '    
             <script>
                 // --- MODAL & TOAST SETUP ---
                 (function() {
-                    if (document.getElementById("confirm-modal")) return; // schon vorhanden
+                    if (document.getElementById("confirm-modal")) return;
 
                     const modalHtml = `
                         <div id="confirm-modal" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 hidden">
@@ -449,7 +452,6 @@ class Main extends PluginBase
                     const yesBtn = document.getElementById("modal-yes");
                     const noBtn = document.getElementById("modal-no");
 
-                    // Alte Event-Listener entfernen durch Klonen
                     const newYes = yesBtn.cloneNode(true);
                     yesBtn.parentNode.replaceChild(newYes, yesBtn);
                     newYes.addEventListener("click", () => {
@@ -486,7 +488,6 @@ class Main extends PluginBase
                     }, 3000);
                 }
 
-                // --- PLUGIN SEARCH & DOWNLOAD ---
                 const authorLabel = '.json_encode($texts["plugin-author"]).';
                 const downloadConfirmTitle = '.json_encode($texts["download-confirm-title"]).';
                 const downloadConfirmMessage = '.json_encode($texts["download-confirm-message"]).';
@@ -549,15 +550,13 @@ class Main extends PluginBase
                         const from = plugin.api && plugin.api[0] ? escapeHtml(plugin.api[0].from) : "N/A";
                         const to = plugin.api && plugin.api[0] ? escapeHtml(plugin.api[0].to) : "N/A";
                         const author = escapeHtml(plugin.producers && plugin.producers.Collaborator && plugin.producers.Collaborator[0] ? plugin.producers.Collaborator[0] : "Unknown");
-                        const downloadUrl = plugin.html_url;
-                        const iconUrl = plugin.icon_url;
                         const artifactUrl = plugin.artifact_url;
 
                         const authorText = authorLabel.replace("{author}", author);
 
                         let iconHtml = "";
-                        if (iconUrl) {
-                            iconHtml = `<img src="${escapeHtml(iconUrl)}" alt="${name}" class="w-16 h-16 rounded-lg object-cover mb-4 border border-[#4b5563]">`;
+                        if (plugin.icon_url) {
+                            iconHtml = `<img src="${escapeHtml(plugin.icon_url)}" alt="${name}" class="w-16 h-16 rounded-lg object-cover mb-4 border border-[#4b5563]">`;
                         } else {
                             iconHtml = `<div class="w-16 h-16 rounded-lg bg-[#1f2937] flex items-center justify-center mb-4 border border-[#4b5563]"><svg class="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg></div>`;
                         }
@@ -610,8 +609,7 @@ class Main extends PluginBase
                 document.addEventListener("DOMContentLoaded", () => {
                     searchPlugins();
                 });
-            </script>
-            ';
+            </script>';
         }
 
         if ($page === "home") {
@@ -622,18 +620,20 @@ class Main extends PluginBase
             $mainContent = '
             <div class="w-full max-w-5xl px-4 sm:px-6 lg:px-8">
                 <h2 class="text-2xl sm:text-3xl font-black tracking-tight mb-6">'.$texts["console"].'</h2>
-                <div class="bg-[#0f0f14] border border-[#2d2d3d] rounded-xl overflow-hidden shadow-2xl flex flex-col">
-                    <div class="bg-[#1a1a24] px-4 py-3 flex items-center gap-2 border-b border-[#2d2d3d]">
-                        <div class="w-3 h-3 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.4)]"></div>
-                        <div class="w-3 h-3 rounded-full bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.4)]"></div>
-                        <div class="w-3 h-3 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]"></div>
+                <div class="bg-[#0f0f14] border border-[#2d2d3d] rounded-3xl overflow-hidden shadow-[0_0_40px_rgba(0,0,0,0.6)] flex flex-col">
+                    <div class="bg-[#1a1a24] px-6 py-4 flex items-center gap-3 border-b border-[#2d2d3d]">
+                        <div class="flex gap-2">
+                            <div class="w-3 h-3 rounded-full bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.6)]"></div>
+                            <div class="w-3 h-3 rounded-full bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.6)]"></div>
+                            <div class="w-3 h-3 rounded-full bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]"></div>
+                        </div>
                         <span class="ml-3 text-xs font-semibold text-gray-400 font-mono tracking-wide">server@pocketmine:~</span>
                     </div>
-                    <div id="console-output" class="p-4 sm:p-6 h-[28rem] overflow-y-auto font-mono text-sm whitespace-pre-wrap flex flex-col gap-0.5 custom-scrollbar"></div>
-                    <form id="cmd-form" class="flex bg-[#1a1a24] border-t border-[#2d2d3d] p-2">
-                        <span class="text-green-400 font-mono px-4 py-3 font-bold">❯</span>
-                        <input id="cmd-input" type="text" placeholder="'.$texts["cmdplaceholder"].'" class="flex-1 bg-transparent text-white placeholder-gray-600 font-mono focus:outline-none" autocomplete="off">
-                        <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-6 py-2 rounded-lg transition mr-2 text-sm">'.$texts["send"].'</button>
+                    <div id="console-output" class="p-6 h-[36rem] overflow-y-auto font-mono text-sm whitespace-pre-wrap flex flex-col gap-1 custom-scrollbar"></div>
+                    <form id="cmd-form" class="flex bg-[#1a1a24] border-t border-[#2d2d3d] p-3">
+                        <span class="text-green-400 font-mono px-5 py-3 font-bold">❯</span>
+                        <input id="cmd-input" type="text" placeholder="'.$texts["cmdplaceholder"].'" class="flex-1 bg-transparent text-white placeholder:text-gray-500 font-mono focus:outline-none text-base" autocomplete="off">
+                        <button type="submit" class="bg-[#60a5fa] hover:bg-[#3b82f6] text-white font-bold px-8 py-3 rounded-2xl transition mr-1 text-sm">'.$texts["send"].'</button>
                     </form>
                 </div>
             </div>';
