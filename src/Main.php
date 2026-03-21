@@ -1,21 +1,19 @@
 <?php
-
 declare(strict_types=1);
-
 namespace floxygit\WebPanel;
-
 use pocketmine\plugin\PluginBase;
 use pocketmine\scheduler\Task;
 use pocketmine\Server;
 use pocketmine\player\Player;
 use pocketmine\console\ConsoleCommandSender;
-
 class Main extends PluginBase
 {
     private $socket;
     private $appPassword;
+    private $task = null;
     public array $commandOutputs = [];
-
+    private $lastLogModifyTime = 0;
+    private $cachedLogLines = [];
     protected function onEnable(): void
     {
         $config = $this->getConfig();
@@ -24,52 +22,39 @@ class Main extends PluginBase
             $config->save();
         }
         $this->appPassword = (string)$config->get("appPassword", "1234");
-
         $port = (int)$config->get("appPort", 7800);
         $this->socket = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
         @socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
-
         if (@socket_bind($this->socket, "0.0.0.0", $port) && @socket_listen($this->socket)) {
             $this->getLogger()->info("Web Server was started on Port {$port}.");
             socket_set_nonblock($this->socket);
-
-            $this->getScheduler()->scheduleRepeatingTask(new class($this->socket, $this->appPassword, $this) extends Task {
+            $this->task = $this->getScheduler()->scheduleRepeatingTask(new class($this->socket, $this->appPassword, $this) extends Task {
                 public function __construct(private $s, private $password, private Main $plugin) {}
-
                 public function onRun(): void
                 {
                     if (($client = @socket_accept($this->s)) === false) {
                         return;
                     }
-
                     $buf = @socket_read($client, 8192);
                     if (!$buf) {
                         @socket_close($client);
                         return;
                     }
-
                     $authenticated = strpos($buf, "webpanel_auth=1") !== false;
-
                     if (!$authenticated) {
                         if (preg_match('/^POST /', $buf) && preg_match('/pass=([^&\r\n]+)/', $buf, $m)) {
                             $submitted = urldecode(trim($m[1]));
                             if ($submitted === $this->password) {
-                                // ────────────────────────────────────────────────
-                                // HIER GEÄNDERT: Nach Login → Dashboard (/) statt /players
                                 $this->sendResponse($client, "HTTP/1.1 302 Found\r\nSet-Cookie: webpanel_auth=1; Path=/; Max-Age=86400\r\nLocation: /\r\n\r\n");
-                                // ────────────────────────────────────────────────
                                 @socket_close($client);
                                 return;
                             }
                         }
-
                         $loginHtml = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>WebPanel Login</title><script src="https://cdn.tailwindcss.com"></script><style>@import url(\'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap\');body { font-family: \'Inter\', sans-serif; background: #0f172a; color: white; margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center; }.card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); }</style></head><body><div class="card w-full max-w-md mx-4 p-10 rounded-3xl shadow-2xl"><div class="text-center mb-10"><span class="text-4xl font-black gradient-text tracking-tighter" style="background: linear-gradient(135deg, #60a5fa, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">WebPanel</span></div><form method="post" class="space-y-6"><div><input type="password" name="pass" placeholder="Enter password" class="w-full bg-[#1f2937] border border-[#4b5563] text-white placeholder:text-[#9ca3af] rounded-2xl px-6 py-4 focus:outline-none focus:border-[#60a5fa] focus:bg-[#334155] text-lg" required autocomplete="off"></div><button type="submit" class="w-full bg-[#60a5fa] hover:bg-[#3b82f6] text-white font-bold py-4 rounded-2xl text-lg transition">Login</button></form><p class="text-center text-white/40 text-sm mt-8">Password from config.yml</p></div></body></html>';
-
                         $this->sendResponse($client, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" . $loginHtml);
                         @socket_close($client);
                         return;
                     }
-
                     if (preg_match('#^GET /api/players #', $buf)) {
                         $players = [];
                         foreach (Server::getInstance()->getOnlinePlayers() as $p) {
@@ -88,32 +73,45 @@ class Main extends PluginBase
                         @socket_close($client);
                         return;
                     }
-
                     if (preg_match('#^GET /api/console #', $buf)) {
                         $logFile = Server::getInstance()->getDataPath() . "server.log";
-                        $logLines = [];
-                        if (file_exists($logFile)) {
-                            $logLines = array_slice(file($logFile), -15);
-                            $logLines = array_map(function($line) {
-                                return \pocketmine\utils\TextFormat::clean(rtrim($line));
-                            }, $logLines);
+                        $currentModifyTime = file_exists($logFile) ? filemtime($logFile) : 0;
+                        if ($currentModifyTime > $this->plugin->lastLogModifyTime) {
+                            $this->plugin->cachedLogLines = [];
+                            if (file_exists($logFile) && filesize($logFile) > 0) {
+                                $file = fopen($logFile, 'r');
+                                if ($file) {
+                                    $pos = -2;
+                                    fseek($file, 0, SEEK_END);
+                                    $lines = [];
+                                    while (count($lines) < 15) {
+                                        $char = fgetc($file);
+                                        if ($char === false) break;
+                                        if ($char === "\n") {
+                                            $lines[] = strrev(fgets($file, 1024));
+                                        } else {
+                                            fseek($file, $pos, SEEK_CUR);
+                                        }
+                                        $pos--;
+                                    }
+                                    $this->plugin->cachedLogLines = array_map('strrev', array_reverse($lines));
+                                    fclose($file);
+                                }
+                            }
+                            $this->plugin->lastLogModifyTime = $currentModifyTime;
                         }
-
                         $json = json_encode([
-                            'log' => $logLines,
+                            'log' => $this->plugin->cachedLogLines,
                             'outputs' => $this->plugin->commandOutputs
                         ]);
                         $this->sendResponse($client, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" . $json);
                         @socket_close($client);
                         return;
                     }
-
                     if (preg_match('/GET \/action\/(\w+)\/([^\/\s?]+)/', $buf, $m)) {
                         $action = $m[1];
                         $target = urldecode($m[2]);
-
                         $player = Server::getInstance()->getPlayerExact($target);
-
                         if ($player instanceof Player || $action === "ban") {
                             switch ($action) {
                                 case "op":    Server::getInstance()->addOp($target); break;
@@ -129,41 +127,33 @@ class Main extends PluginBase
                         @socket_close($client);
                         return;
                     }
-
                     if (preg_match('#^POST /console #', $buf) && preg_match('#command=([^&\r\n]+)#', $buf, $m)) {
                         $cmd = urldecode(trim($m[1]));
                         if ($cmd !== '') {
                             $server = Server::getInstance();
-
                             $this->plugin->commandOutputs[] = [
                                 'type' => 'command',
                                 'time' => date('H:i:s'),
                                 'text' => $cmd
                             ];
-
                             $sender = new class($server, $server->getLanguage(), $this->plugin) extends ConsoleCommandSender {
                                 public function __construct(Server $server, \pocketmine\lang\Language $language, private Main $plugin) {
                                     parent::__construct($server, $language);
                                 }
-
                                 public function sendMessage(string|\pocketmine\lang\Translatable $message) : void {
                                     if ($message instanceof \pocketmine\lang\Translatable) {
                                         $message = $this->getLanguage()->translate($message);
                                     }
-
                                     $clean = \pocketmine\utils\TextFormat::clean($message);
                                     $this->plugin->commandOutputs[] = [
                                         'type' => 'output',
                                         'time' => date('H:i:s'),
                                         'text' => $clean
                                     ];
-
                                     parent::sendMessage($message);
                                 }
                             };
-
                             $server->dispatchCommand($sender, $cmd);
-
                             if (count($this->plugin->commandOutputs) > 50) {
                                 $this->plugin->commandOutputs = array_slice($this->plugin->commandOutputs, -50);
                             }
@@ -172,64 +162,46 @@ class Main extends PluginBase
                         @socket_close($client);
                         return;
                     }
-
                     if (preg_match('#^GET /api/plugin/download\?([^ ]+)#', $buf, $m)) {
                         parse_str($m[1], $params);
                         $name = $params['name'] ?? null;
                         $version = $params['version'] ?? null;
                         $artifactUrl = $params['artifact_url'] ?? null;
-
                         if ($name && $artifactUrl) {
                             $fileName = $name . '.phar';
                             $filePath = Server::getInstance()->getDataPath() . 'plugins/' . $fileName;
-
-                            $context = stream_context_create([
-                                'http' => [
-                                    'follow_location' => true,
-                                    'max_redirects' => 5,
-                                    'timeout' => 60,
-                                ]
-                            ]);
-
-                            $content = @file_get_contents($artifactUrl, false, $context);
-                            if ($content === false) {
-                                $this->sendResponse($client, "HTTP/1.1 500 Internal Server Error\r\n\r\nFailed to download plugin from Poggit.");
-                            } else {
-                                if (file_put_contents($filePath, $content) === false) {
-                                    $this->sendResponse($client, "HTTP/1.1 500 Internal Server Error\r\n\r\nFailed to save plugin to server.");
-                                } else {
-                                    $this->sendResponse($client, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nPlugin '$name' downloaded successfully as $fileName");
-                                }
-                            }
+                            $cmd = 'php -r "file_put_contents(' . var_export($filePath, true) . ', file_get_contents(' . var_export($artifactUrl, true) . '));" > /dev/null 2>&1 &';
+                            exec($cmd);
+                            $this->sendResponse($client, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nPlugin download started in background.");
                         } else {
                             $this->sendResponse($client, "HTTP/1.1 400 Bad Request\r\n\r\nMissing parameters.");
                         }
                         @socket_close($client);
                         return;
                     }
-
                     $html = $this->plugin->render($buf);
                     $this->sendResponse($client, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" . $html);
                     @socket_close($client);
                 }
-
                 private function sendResponse($client, string $content): void
                 {
                     @socket_write($client, $content, strlen($content));
                 }
-            }, 1);
+            }, 2); // 2 Ticks = 100ms
         } else {
             $this->getLogger()->error("Web Server was unable to start on Port {$port}.");
         }
     }
-
     protected function onDisable(): void
     {
+        if ($this->task !== null) {
+            $this->getScheduler()->cancelTask($this->task);
+            $this->task = null;
+        }
         if ($this->socket) {
             @socket_close($this->socket);
         }
     }
-
     public function render(string $buffer): string
     {
         $page = "home";
@@ -242,7 +214,6 @@ class Main extends PluginBase
         if (preg_match('#^GET /plugin-downloader\s#', $buffer)) {
             $page = "plugin-downloader";
         }
-
         $texts = [
             "welcome" => "Welcome!",
             "sub"     => "Your dashboard is ready for action.",
@@ -267,18 +238,14 @@ class Main extends PluginBase
             "toast-success" => "{plugin}.phar was saved into the plugins folder.",
             "toast-error" => "Download failed: {error}",
         ];
-
         $liveScript = '';
-
         if ($page === "players") {
             $liveScript = '    
             <script>
                 const playersContainer = document.getElementById("players-container");
                 const countBadge = document.getElementById("online-count");
                 const searchInput = document.getElementById("player-search");
-
                 let allPlayers = [];
-
                 async function fetchPlayers() {
                     try {
                         const res = await fetch("/api/players");
@@ -288,7 +255,6 @@ class Main extends PluginBase
                         renderPlayers(allPlayers);
                     } catch (e) { console.error("Fetch failed", e); }
                 }
-
                 function renderPlayers(players) {
                     let html = "";
                     if (players.length === 0) {
@@ -299,7 +265,6 @@ class Main extends PluginBase
                             const opAction = p.isOp ? "deop" : "op";
                             const opText  = p.isOp ? "De-OP" : "OP";
                             const nameEnc = encodeURIComponent(p.name);
-
                             html += `
                             <div class="user-card">
                                 <div class="flex flex-col items-center mb-5">
@@ -324,7 +289,6 @@ class Main extends PluginBase
                     }
                     if(document.activeElement !== searchInput) playersContainer.innerHTML = html;
                 }
-
                 function filterPlayers() {
                     const term = searchInput.value.toLowerCase().trim();
                     if (!term) {
@@ -334,40 +298,33 @@ class Main extends PluginBase
                     const filtered = allPlayers.filter(p => p.name.toLowerCase().includes(term));
                     renderPlayers(filtered);
                 }
-
                 fetchPlayers();
                 setInterval(fetchPlayers, 2000);
-
                 if (searchInput) {
                     searchInput.addEventListener("input", filterPlayers);
                 }
             </script>';
         }
-
         if ($page === "console") {
             $liveScript = '    
             <script>
                 const consoleOutput = document.getElementById("console-output");
                 const cmdInput = document.getElementById("cmd-input");
                 let isScrolledToBottom = true;
-
                 consoleOutput.addEventListener("scroll", () => {
                     isScrolledToBottom = consoleOutput.scrollHeight - consoleOutput.clientHeight <= consoleOutput.scrollTop + 10;
                 });
-
                 async function fetchConsole() {
                     try {
                         const res = await fetch("/api/console");
                         const data = await res.json();
                         let html = "";
-
                         if (data.log.length > 0) {
                             html += `<div class="text-[10px] text-gray-500 uppercase tracking-widest mb-2 border-b border-[#2d2d3d] pb-1">Server Log</div>`;
                             data.log.forEach(line => {
                                 html += `<div class="text-[13px] text-gray-400 font-mono leading-relaxed">${line}</div>`;
                             });
                         }
-
                         if (data.outputs.length > 0) {
                             html += `<div class="text-[10px] text-blue-500 uppercase tracking-widest mt-6 mb-2 border-b border-[#2d2d3d] pb-1">Web Session</div>`;
                             data.outputs.forEach(item => {
@@ -385,22 +342,18 @@ class Main extends PluginBase
                                 }
                             });
                         }
-
                         consoleOutput.innerHTML = html;
                         if (isScrolledToBottom) {
                             consoleOutput.scrollTop = consoleOutput.scrollHeight;
                         }
                     } catch (e) { console.error("Console fetch failed", e); }
                 }
-
                 fetchConsole();
                 setInterval(fetchConsole, 1500);
-
                 document.getElementById("cmd-form").addEventListener("submit", async (e) => {
                     e.preventDefault();
                     const cmd = cmdInput.value.trim();
                     if (!cmd) return;
-
                     cmdInput.disabled = true;
                     try {
                         await fetch("/console", {
@@ -417,14 +370,11 @@ class Main extends PluginBase
                 });
             </script>';
         }
-
         if ($page === "plugin-downloader") {
             $liveScript = '    
             <script>
-                // --- MODAL & TOAST SETUP ---
                 (function() {
                     if (document.getElementById("confirm-modal")) return;
-
                     const modalHtml = `
                         <div id="confirm-modal" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 hidden">
                             <div class="bg-[#1f2937] border border-[#4b5563] rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl">
@@ -440,7 +390,6 @@ class Main extends PluginBase
                     `;
                     document.body.insertAdjacentHTML("beforeend", modalHtml);
                 })();
-
                 function showConfirmModal(title, message, onConfirm) {
                     const modal = document.getElementById("confirm-modal");
                     const titleEl = document.getElementById("modal-title");
@@ -448,24 +397,20 @@ class Main extends PluginBase
                     titleEl.textContent = title;
                     messageEl.textContent = message;
                     modal.classList.remove("hidden");
-
                     const yesBtn = document.getElementById("modal-yes");
                     const noBtn = document.getElementById("modal-no");
-
                     const newYes = yesBtn.cloneNode(true);
                     yesBtn.parentNode.replaceChild(newYes, yesBtn);
                     newYes.addEventListener("click", () => {
                         modal.classList.add("hidden");
                         onConfirm();
                     });
-
                     const newNo = noBtn.cloneNode(true);
                     noBtn.parentNode.replaceChild(newNo, noBtn);
                     newNo.addEventListener("click", () => {
                         modal.classList.add("hidden");
                     });
                 }
-
                 function showToast(message, type = "success") {
                     const container = document.getElementById("toast-container");
                     const toast = document.createElement("div");
@@ -473,11 +418,9 @@ class Main extends PluginBase
                     toast.className = `${bgClass} text-white px-6 py-3 rounded-lg shadow-lg transform transition-all duration-300 translate-x-full`;
                     toast.textContent = message;
                     container.appendChild(toast);
-
                     setTimeout(() => {
                         toast.classList.remove("translate-x-full");
                     }, 10);
-
                     setTimeout(() => {
                         toast.classList.add("translate-x-full");
                         setTimeout(() => {
@@ -487,24 +430,20 @@ class Main extends PluginBase
                         }, 300);
                     }, 3000);
                 }
-
                 const authorLabel = '.json_encode($texts["plugin-author"]).';
                 const downloadConfirmTitle = '.json_encode($texts["download-confirm-title"]).';
                 const downloadConfirmMessage = '.json_encode($texts["download-confirm-message"]).';
                 const toastSuccessTemplate = '.json_encode($texts["toast-success"]).';
                 const toastErrorTemplate = '.json_encode($texts["toast-error"]).';
-
                 function escapeHtml(text) {
                     if (typeof text !== "string") return text;
                     const div = document.createElement("div");
                     div.textContent = text;
                     return div.innerHTML;
                 }
-
                 const searchInput = document.getElementById("plugin-search-input");
                 const searchButton = document.getElementById("plugin-search-button");
                 const resultsContainer = document.getElementById("plugin-results");
-
                 async function searchPlugins(query = "") {
                     let url = "https://poggit.pmmp.io/plugins.min.json";
                     if (query.trim() !== "") {
@@ -512,12 +451,10 @@ class Main extends PluginBase
                     } else {
                         url += "?limit=3";
                     }
-
                     try {
                         const res = await fetch(url);
                         if (!res.ok) throw new Error("Network response was not ok");
                         let plugins = await res.json();
-
                         if (query.trim() !== "") {
                             const pluginMap = {};
                             plugins.forEach(plugin => {
@@ -528,20 +465,17 @@ class Main extends PluginBase
                             });
                             plugins = Object.values(pluginMap);
                         }
-
                         displayPlugins(plugins);
                     } catch (e) {
                         console.error("Search failed:", e);
                         resultsContainer.innerHTML = `<div class="col-span-full text-center py-8 text-red-500">'.$texts["plugin-load-error"].'</div>`;
                     }
                 }
-
                 function displayPlugins(plugins) {
                     if (!Array.isArray(plugins) || plugins.length === 0) {
                         resultsContainer.innerHTML = `<div class="col-span-full text-center py-8 opacity-50">'.$texts["plugin-no-results"].'</div>`;
                         return;
                     }
-
                     let html = "";
                     plugins.forEach(plugin => {
                         const name = escapeHtml(plugin.name);
@@ -551,16 +485,13 @@ class Main extends PluginBase
                         const to = plugin.api && plugin.api[0] ? escapeHtml(plugin.api[0].to) : "N/A";
                         const author = escapeHtml(plugin.producers && plugin.producers.Collaborator && plugin.producers.Collaborator[0] ? plugin.producers.Collaborator[0] : "Unknown");
                         const artifactUrl = plugin.artifact_url;
-
                         const authorText = authorLabel.replace("{author}", author);
-
                         let iconHtml = "";
                         if (plugin.icon_url) {
                             iconHtml = `<img src="${escapeHtml(plugin.icon_url)}" alt="${name}" class="w-16 h-16 rounded-lg object-cover mb-4 border border-[#4b5563]">`;
                         } else {
                             iconHtml = `<div class="w-16 h-16 rounded-lg bg-[#1f2937] flex items-center justify-center mb-4 border border-[#4b5563]"><svg class="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg></div>`;
                         }
-
                         html += `
                             <div class="bg-[#1f2937] border border-[#4b5563] rounded-xl p-6 hover:border-blue-500 transition flex flex-col items-center text-center">
                                 ${iconHtml}
@@ -568,14 +499,12 @@ class Main extends PluginBase
                                 <p class="text-gray-400 text-xs mb-3 uppercase tracking-wider font-bold">PMMP ${from} - ${to}</p>
                                 <p class="text-white/60 text-sm italic mb-4 line-clamp-3">${tagline}</p>
                                 <p class="text-gray-300 text-xs mb-6">${authorText}</p>
-                                <button onclick="downloadPlugin(\`/api/plugin/download?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}&artifact_url=${encodeURIComponent(artifactUrl)}\`)" class="mt-auto inline-block bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 px-8 rounded-lg transition text-sm">'.$texts["plugin-download"].'</button>
+                                <button onclick="downloadPlugin(`/api/plugin/download?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}&artifact_url=${encodeURIComponent(artifactUrl)}\`)" class="mt-auto inline-block bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 px-8 rounded-lg transition text-sm">'.$texts["plugin-download"].'</button>
                             </div>
                         `;
                     });
-
                     resultsContainer.innerHTML = html;
                 }
-
                 async function downloadPlugin(url) {
                     showConfirmModal(
                         downloadConfirmTitle,
@@ -595,23 +524,19 @@ class Main extends PluginBase
                         }
                     );
                 }
-
                 searchButton.addEventListener("click", () => {
                     searchPlugins(searchInput.value);
                 });
-
                 searchInput.addEventListener("keypress", (e) => {
                     if (e.key === "Enter") {
                         searchPlugins(searchInput.value);
                     }
                 });
-
                 document.addEventListener("DOMContentLoaded", () => {
                     searchPlugins();
                 });
             </script>';
         }
-
         if ($page === "home") {
             $mainContent = '<div class="text-center px-4"><h1 class="text-5xl sm:text-7xl md:text-8xl font-black mb-6 gradient-text tracking-tighter">'.$texts["welcome"].'</h1><p class="text-white/50 text-base sm:text-lg">'.$texts["sub"].'</p></div>';
         } elseif ($page === "players") {
@@ -654,7 +579,6 @@ class Main extends PluginBase
         } else {
             $mainContent = '<div class="text-center opacity-50 text-xl sm:text-2xl px-4">404 - Page not found</div>';
         }
-
         return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>WebPanel</title><script src="https://cdn.tailwindcss.com"></script><style>@import url(\'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap\');body { font-family: \'Inter\', sans-serif; background: #0f172a; color: white; margin: 0; overflow: hidden; height: 100vh; display: flex; }.sidebar { width: 280px; background: #131c2e; border-right: 1px solid rgba(255,255,255,0.06); transition: transform 0.3s ease; z-index: 50; }@media (max-width: 768px) { .sidebar { position: fixed; height: 100%; transform: translateX(-100%); } .sidebar.open { transform: translateX(0); } }.content { flex: 1; display: flex; flex-direction: column; height: 100%; overflow-y: auto; background: radial-gradient(circle at 50% 0%, #1e293b 0%, #0f172a 100%); }.gradient-text { background: linear-gradient(135deg, #60a5fa, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }.user-card { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255,255,255,0.09); padding: 1.5rem; border-radius: 1.25rem; transition: all 0.2s; }.user-card:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(0,0,0,0.25); }.action-btn { text-align: center; padding: 0.7rem; border-radius: 0.75rem; font-size: 0.8125rem; font-weight: 800; text-transform: uppercase; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.1); }.action-btn:hover { transform: translateY(-1px); }.btn-blue { background: rgba(59, 130, 246, 0.12); color: #60a5fa; }.btn-orange { background: rgba(249, 115, 22, 0.12); color: #fb923c; }.btn-yellow { background: rgba(234, 179, 8, 0.12); color: #facc15; }.btn-red { background: rgba(239, 68, 68, 0.12); color: #f87171; }.nav-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.85rem 1.2rem; border-radius: 0.75rem; font-weight: 700; color: rgba(255,255,255,0.65); transition: all 0.2s; }.nav-item:hover { color: white; background: rgba(255,255,255,0.06); }.nav-item.active { background: rgba(96, 165, 250, 0.14); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.18); }#player-search:focus, #cmd-input:focus { box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.25); } .custom-scrollbar::-webkit-scrollbar { width: 8px; } .custom-scrollbar::-webkit-scrollbar-track { background: #0f0f14; } .custom-scrollbar::-webkit-scrollbar-thumb { background: #2d2d3d; border-radius: 4px; } .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4b4b63; }</style></head><body><aside id="sidebar" class="sidebar flex flex-col"><div class="p-6 p-8 flex items-center justify-between"><span class="text-2xl font-black gradient-text tracking-tighter">WebPanel</span><button onclick="toggleSidebar()" class="md:hidden text-white/50 text-2xl">×</button></div><nav class="flex-1 px-3 px-4 space-y-1.5"><a href="/" class="nav-item '.($page==="home"?"active":"").'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg> '.$texts["dash"].'</a><a href="/players" class="nav-item '.($page==="players"?"active":"").'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg> '.$texts["pm"].'</a><a href="/console" class="nav-item '.($page==="console"?"active":"").'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg> '.$texts["console"].'</a><a href="/plugin-downloader" class="nav-item '.($page==="plugin-downloader"?"active":"").'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> '.$texts["plugin-downloader"].'</a></nav></aside><div class="content"><header class="p-4 flex items-center gap-4 sticky top-0 bg-[#0f172a]/70 backdrop-blur-lg z-40 border-b border-white/5"><button onclick="toggleSidebar()" class="p-2.5 bg-white/5 hover:bg-white/10 rounded-lg md:hidden"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg></button><span class="font-bold opacity-50 uppercase text-xs tracking-widest">'.($page==="home" ? $texts["dash"] : ($page==="players" ? $texts["pm"] : ($page==="plugin-downloader" ? $texts["plugin-downloader"] : $texts["console"]))).'</span></header><main class="p-6 flex-1 flex flex-col items-center">'.$mainContent.'</main></div><script>function toggleSidebar(){document.getElementById("sidebar").classList.toggle("open")}</script>'.$liveScript.'</body></html>';
     }
 }
