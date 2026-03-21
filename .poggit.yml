@@ -6,5 +6,5 @@ branches:
 projects:
   WebPanel:
     path: ""
-    icon: plugin-icon.png
+    icon: "plugin-icon.png"
 ...
