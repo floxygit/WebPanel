@@ -30,6 +30,7 @@ class Main extends PluginBase
         @socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
 
         if (@socket_bind($this->socket, "0.0.0.0", $port) && @socket_listen($this->socket)) {
+            $this->getLogger()->info("Web Server was started on Port {$port}.");
             socket_set_nonblock($this->socket);
             $this->getScheduler()->scheduleRepeatingTask(new class($this->socket, $this->appPassword, $this) extends Task {
                 public function __construct(private $s, private $password, private Main $plugin) {}
@@ -88,7 +89,6 @@ class Main extends PluginBase
                         $logFile = Server::getInstance()->getDataPath() . "server.log";
                         $logLines = [];
                         if (file_exists($logFile)) {
-                            // Letzte 15 Zeilen des Logs holen und Farben bereinigen
                             $logLines = array_slice(file($logFile), -15);
                             $logLines = array_map(function($line) {
                                 return \pocketmine\utils\TextFormat::clean(rtrim($line));
@@ -131,14 +131,12 @@ class Main extends PluginBase
                         if ($cmd !== '') {
                             $server = Server::getInstance();
 
-                            // 1. Befehl im Array speichern
                             $this->plugin->commandOutputs[] = [
                                 'type' => 'command',
                                 'time' => date('H:i:s'),
                                 'text' => $cmd
                             ];
 
-                            // 2. Custom Sender erstellen, um die Ausgabe abzufangen
                             $sender = new class($server, $server->getLanguage(), $this->plugin) extends ConsoleCommandSender {
                                 public function __construct(Server $server, \pocketmine\lang\Language $language, private Main $plugin) {
                                     parent::__construct($server, $language);
@@ -148,24 +146,20 @@ class Main extends PluginBase
                                     if ($message instanceof \pocketmine\lang\Translatable) {
                                         $message = $this->getLanguage()->translate($message);
                                     }
-                                    
-                                    // Ausgabe bereinigen und speichern
+
                                     $clean = \pocketmine\utils\TextFormat::clean($message);
                                     $this->plugin->commandOutputs[] = [
                                         'type' => 'output',
                                         'time' => date('H:i:s'),
                                         'text' => $clean
                                     ];
-                                    
-                                    // Optional: Weiterhin in der echten Konsole anzeigen
+
                                     parent::sendMessage($message);
                                 }
                             };
 
-                            // 3. Befehl mit unserem Custom Sender ausführen
                             $server->dispatchCommand($sender, $cmd);
 
-                            // Speicher limitieren (z.B. die letzten 50 Einträge behalten, um RAM zu sparen)
                             if (count($this->plugin->commandOutputs) > 50) {
                                 $this->plugin->commandOutputs = array_slice($this->plugin->commandOutputs, -50);
                             }
@@ -185,6 +179,8 @@ class Main extends PluginBase
                     @socket_write($client, $content, strlen($content));
                 }
             }, 1);
+        } else {
+            $this->getLogger()->error("Web Server was unable to start on Port {$port}.");
         }
     }
 
@@ -348,7 +344,7 @@ class Main extends PluginBase
                     e.preventDefault();
                     const cmd = cmdInput.value.trim();
                     if (!cmd) return;
-                    
+
                     cmdInput.disabled = true;
                     try {
                         await fetch("/console", {
@@ -371,7 +367,6 @@ class Main extends PluginBase
         } elseif ($page === "players") {
             $mainContent = '<div class="w-full max-w-7xl px-4 sm:px-6 lg:px-8"><div class="flex flex-col gap-6 mb-10"><div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5"><h2 class="text-2xl sm:text-3xl font-black tracking-tight">'.$texts["pm"].'</h2><div id="online-count" class="px-4 py-1.5 rounded-full bg-blue-500/10 text-blue-400 text-xs sm:text-sm font-bold border border-blue-500/20 whitespace-nowrap text-center">0 online</div></div><input id="player-search" type="text" placeholder="'.$texts["search"].'" class="w-full sm:w-72 bg-[#1f2937] border border-[#4b5563] text-white placeholder:text-[#9ca3af] rounded-2xl px-6 py-4 focus:outline-none focus:border-[#60a5fa] focus:bg-[#334155] transition-all"></div><div id="players-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 sm:gap-6"><div class="col-span-full text-center py-16 opacity-30 italic">Loading players...</div></div></div>';
         } elseif ($page === "console") {
-            // Modern Terminal UI Design
             $mainContent = '
             <div class="w-full max-w-5xl px-4 sm:px-6 lg:px-8">
                 <h2 class="text-2xl sm:text-3xl font-black tracking-tight mb-6">'.$texts["console"].'</h2>
